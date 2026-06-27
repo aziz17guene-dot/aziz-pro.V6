@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aziz-Pro</title>
     <!-- Supabase JS -->
-    
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <!-- Tailwind CSS & Lucide Icons -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
@@ -223,7 +223,9 @@
         // ============================================================
         const SUPA_URL = 'https://jbkiynskxkgmdasmgvmj.supabase.co';
         const SUPA_KEY = 'sb_publishable_Koqd9ujplxq_l5FDm7QAvQ_AV_1yY5d';
-        const supa = null; // Supabase disabled
+        const supa = (window.supabase && window.supabase.createClient)
+            ? window.supabase.createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: false } })
+            : null;
         const CLOUD_KEYS = ['PRODUCTS','SALES','EXPENSES','SUPPLIERS','PURCHASES','CUSTOMERS','AUDIT','USERS','SHOP','SHOPS'];
         const LS_LAST_SYNC = (id) => `ma_cloud_last_sync_${id}`;
         const LS_LAST_PULL = (id) => `ma_cloud_last_pull_${id}`;
@@ -358,10 +360,30 @@
         window.Cloud = Cloud;
 
         // React hook to subscribe to cloud status
-        
+        function useCloudStatus() {
+            const [s, setS] = React.useState(Cloud.getState());
+            React.useEffect(() => Cloud.subscribe(setS), []);
+            return s;
+        }
 
         // Floating pill: visible everywhere, shows live cloud status
-        
+        function CloudStatusPill() {
+            const s = useCloudStatus();
+            if (!s.available) return null;
+            const meta = {
+                synced:  { color: 'bg-emerald-600', icon: 'cloud-check',  label: 'Synchronisé' },
+                syncing: { color: 'bg-blue-600',    icon: 'refresh-cw',   label: 'Sync…' },
+                offline: { color: 'bg-amber-600',   icon: 'wifi-off',     label: 'Hors ligne' + (s.queue ? ` (${s.queue})` : '') },
+                error:   { color: 'bg-red-600',     icon: 'alert-triangle', label: 'Erreur cloud' },
+                idle:    { color: 'bg-slate-500',   icon: 'cloud',        label: 'Cloud' },
+            }[s.status] || { color: 'bg-slate-500', icon: 'cloud', label: s.status };
+            return (
+                <div className={`fixed bottom-3 right-3 z-50 ${meta.color} text-white rounded-full shadow-lg px-3 py-1.5 flex items-center gap-2 text-[10px] font-black uppercase tracking-wider print:hidden ${s.status==='syncing'?'animate-pulse':''}`} title={s.lastError || meta.label}>
+                    <Icon name={meta.icon} size={12}/> {meta.label}
+                </div>
+            );
+        }
+
         // Bouton flottant "Installer l'application" (Android/Windows via Chrome/Edge).
         // Sur iOS : message expliquant Partager → Sur l'écran d'accueil.
         function InstallAppButton() {
@@ -525,7 +547,7 @@
             // Auto-push intelligent (debounce intégré dans le manager + file d'attente offline)
             useEffect(() => {
                 if (!shop?.id || !supa) return;
-                
+                Cloud.schedulePush(shop.id);
             }, [products, sales, expenses, suppliers, purchases, customers, users, shops, shop]);
 
             const isEmployee = currentUser && currentUser.role === 'employee';
@@ -2159,7 +2181,72 @@
             );
         }
 
-        
+        function CloudSyncPanel({ shop }) {
+            const s = useCloudStatus();
+            const [busy, setBusy] = React.useState(false);
+            const [showBackups, setShowBackups] = React.useState(false);
+            const [backups, setBackups] = React.useState(() => Cloud.listBackups());
+
+            const fmt = (iso) => iso ? new Date(iso).toLocaleString() : '—';
+            const meta = {
+                synced:      { color: 'emerald', icon: 'cloud-check', label: 'Synchronisé' },
+                syncing:     { color: 'blue',    icon: 'refresh-cw',  label: 'Synchronisation…' },
+                offline:     { color: 'amber',   icon: 'wifi-off',    label: 'Hors ligne' },
+                error:       { color: 'red',     icon: 'alert-triangle', label: 'Erreur cloud' },
+                idle:        { color: 'slate',   icon: 'cloud',       label: 'En attente' },
+                unavailable: { color: 'slate',   icon: 'cloud-off',   label: 'Cloud indisponible' },
+            }[s.status] || { color: 'slate', icon: 'cloud', label: s.status };
+
+            const forcePush = async () => { setBusy(true); await Cloud.push(shop.id); setBusy(false); };
+            const forcePull = async () => {
+                if (!confirm("Restaurer les données depuis le cloud ? Les changements locaux non synchronisés seront écrasés.")) return;
+                setBusy(true); const ts = await Cloud.pull(shop.id); setBusy(false);
+                if (ts) { alert("Données cloud restaurées."); window.location.reload(); }
+            };
+            const restoreLocal = (idx) => {
+                if (!confirm("Restaurer cette sauvegarde locale ? Les données actuelles seront remplacées.")) return;
+                try { Cloud.restoreBackup(idx); window.location.reload(); }
+                catch (e) { alert("Échec : " + e.message); }
+            };
+
+            return (
+                <div className={`bg-white p-6 rounded-[40px] shadow-sm border-2 border-${meta.color}-200 space-y-4`}>
+                    <div className="flex items-center gap-4">
+                        <div className={`w-12 h-12 bg-${meta.color}-600 rounded-2xl flex items-center justify-center text-white shrink-0 ${s.status==='syncing' ? 'animate-pulse' : ''}`}>
+                            <Icon name={meta.icon} size={22}/>
+                        </div>
+                        <div className="min-w-0 flex-1">
+                            <h3 className="text-sm font-black uppercase tracking-tighter">Sauvegarde Cloud — {meta.label}</h3>
+                            <p className="text-[10px] font-bold text-slate-500 leading-relaxed">
+                                {s.online ? 'En ligne' : 'Hors ligne'} · File d'attente : {s.queue}
+                                {s.lastSync && <> · Dernier envoi : {fmt(s.lastSync)}</>}
+                            </p>
+                            <p className="text-[10px] font-mono text-blue-600 mt-1 truncate">ID boutique : {shop?.id}</p>
+                            {s.lastError && <p className="text-[10px] text-red-600 font-bold mt-1 truncate">⚠ {s.lastError}</p>}
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                        <button disabled={busy || !s.available} onClick={forcePush} className="py-3 bg-emerald-600 disabled:bg-slate-300 text-white rounded-2xl font-black uppercase text-[10px] flex items-center justify-center gap-2"><Icon name="upload-cloud" size={14}/> Envoyer</button>
+                        <button disabled={busy || !s.available} onClick={forcePull} className="py-3 bg-blue-600 disabled:bg-slate-300 text-white rounded-2xl font-black uppercase text-[10px] flex items-center justify-center gap-2"><Icon name="download-cloud" size={14}/> Restaurer</button>
+                    </div>
+                    <button onClick={() => { setBackups(Cloud.listBackups()); setShowBackups(v => !v); }} className="w-full py-2 text-[10px] font-black uppercase text-slate-600 hover:text-slate-900">
+                        {showBackups ? '▲ Masquer' : '▼ Voir'} les sauvegardes locales ({backups.length})
+                    </button>
+                    {showBackups && (
+                        <div className="space-y-1 max-h-48 overflow-y-auto">
+                            {backups.length === 0 && <p className="text-[10px] text-slate-400 text-center py-2">Aucune sauvegarde locale</p>}
+                            {backups.map((b, i) => (
+                                <div key={i} className="flex items-center justify-between bg-slate-50 rounded-xl px-3 py-2">
+                                    <span className="text-[10px] font-mono">{fmt(b.at)}</span>
+                                    <button onClick={() => restoreLocal(i)} className="px-3 py-1 bg-slate-900 text-white rounded-lg text-[9px] font-black uppercase">Restaurer</button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
 
         function Settings({ storage, products, sales, expenses, shop, setShop, shops = [], setShops, logs, activities, suppliers = [], purchases = [], customers = [], audit = [], logout, currentUser }) {
             const exportExcel = () => {
@@ -2248,7 +2335,7 @@
                         </div>
                     </div>
 
-                    <!-- Cloud Sync removed for now -->
+                    <CloudSyncPanel shop={shop} />
 
                     <div className="bg-white p-8 rounded-[40px] shadow-sm border space-y-4">
                         <h3 className="text-lg font-black uppercase tracking-tighter">Sauvegarde & Export</h3>
