@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Aziz-Pro - Gestion Boutique</title>
-    <link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="%232563eb"/><stop offset="1" stop-color="%230f172a"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(%23g)"/><path d="M14 26h36l-3 22a4 4 0 0 1-4 3.5H21a4 4 0 0 1-4-3.5L14 26z" fill="%23fbbf24"/><path d="M22 26v-6a10 10 0 0 1 20 0v6" fill="none" stroke="%23fbbf24" stroke-width="3.5" stroke-linecap="round"/><text x="32" y="46" font-family="Inter,Arial" font-size="14" font-weight="900" text-anchor="middle" fill="%230f172a">AZ</text></svg>'>
+    <title>Aziz-Pro</title>
     <!-- Supabase JS -->
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <!-- Tailwind CSS & Lucide Icons -->
@@ -25,6 +24,8 @@
     <!-- PWA : Lien vers fichier manifest.json pour permettre l'installation -->
     <link rel="manifest" href="./manifest.json">
     <meta name="theme-color" content="#2563eb">
+    <link rel="apple-touch-icon" href="./icon-192.svg">
+    <link rel="icon" type="image/svg+xml" href="./icon-192.svg">
     <meta name="theme-color" content="#2563eb">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -434,6 +435,8 @@
         function App() {
             const [view, setView] = useState('dashboard');
             const [menuOpen, setMenuOpen] = useState(false);
+            const [showInstall, setShowInstall] = useState(false);  // === AJOUT: Bouton installation ===
+            const [deferredPrompt, setDeferredPrompt] = useState(null);  // === AJOUT: Stocker prompt ===
             const [products, setProducts] = useState(() => storage.get(KEYS.PRODUCTS, INITIAL_PRODUCTS));
             const [sales, setSales] = useState(() => storage.get(KEYS.SALES));
             const [expenses, setExpenses] = useState(() => storage.get(KEYS.EXPENSES));
@@ -485,6 +488,27 @@
             useEffect(() => { storage.set(KEYS.CUSTOMERS, customers); }, [customers]);
             useEffect(() => { storage.set(KEYS.AUDIT, audit); }, [audit]);
             useEffect(() => { storage.set(KEYS.SHOPS, shops); }, [shops]);
+
+            // === CORRECTION 1: Bouton installation Android visible ===
+            useEffect(() => {
+                const handler = (e) => {
+                    e.preventDefault();
+                    setDeferredPrompt(e);
+                    setShowInstall(true);
+                };
+                window.addEventListener('beforeinstallprompt', handler);
+                return () => window.removeEventListener('beforeinstallprompt', handler);
+            }, []);
+
+            const handleInstall = async () => {
+                if (!deferredPrompt) return;
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    setDeferredPrompt(null);
+                    setShowInstall(false);
+                }
+            };
 
             // Cloud: pull at first session start, then refresh React state from storage
             //  → no more window.location.reload(): on évite de perdre la saisie en cours.
@@ -558,16 +582,13 @@
             const updateProduct = (p) => { setProducts(prev => prev.map(x => x.id === p.id ? p : x)); logAudit('PRODUIT_MODIF', p.name); };
 
             const receivePurchase = (po) => {
-                // Augmente le stock pour chaque ligne et met à jour prix d'achat moyen pondéré
+                // Augmente le stock pour chaque ligne mais NE CHANGE PAS le prix d'achat moyen
                 setProducts(prev => prev.map(p => {
                     const line = po.items.find(i => i.pid === p.id);
                     if (!line) return p;
                     const oldStock = Number(p.stock) || 0;
-                    const oldVal = oldStock * (Number(p.purchasePrice) || 0);
-                    const newVal = line.qty * line.unitCost;
                     const totStock = oldStock + line.qty;
-                    const avgCost = totStock > 0 ? Math.round((oldVal + newVal) / totStock) : line.unitCost;
-                    return { ...p, stock: Number((totStock).toFixed(2)), purchasePrice: avgCost };
+                    return { ...p, stock: Number((totStock).toFixed(2)) };
                 }));
                 setPurchases(prev => [{ ...po, id: Date.now(), date: new Date().toISOString(), receivedBy: currentUser?.name }, ...prev]);
                 logAudit('REAPPRO', `${po.supplierName} - ${po.items.length} ligne(s)`);
@@ -593,6 +614,11 @@
                     {menuOpen && <div onClick={() => setMenuOpen(false)} className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[90] md:hidden" />}
 
                     <nav className={`fixed inset-y-0 left-0 w-64 bg-slate-900 p-4 flex flex-col gap-1 border-r border-slate-800 z-[100] transition-transform duration-300 md:relative md:translate-x-0 ${menuOpen ? 'translate-x-0' : '-translate-x-full'} print:hidden text-slate-400 overflow-y-auto`}>
+                        {showInstall && (
+                            <button onClick={handleInstall} className="w-full py-2 px-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-black uppercase rounded-lg mb-3 hover:shadow-lg">
+                                ⬇️ Installer l'app
+                            </button>
+                        )}
                         <div className="p-4 mb-4 bg-slate-800/50 rounded-2xl border border-slate-700/50 flex justify-between items-center gap-3">
                             <div className="flex items-center gap-3 min-w-0">
                                 {shop?.logo
@@ -896,16 +922,28 @@
                 setBusy(true);
                 try {
                     // 1) Si la boutique est déjà connue localement → on y retourne immédiatement
-                    const shops = JSON.parse(localStorage.getItem(KEYS.SHOPS) || '[]');
+                    let shops = JSON.parse(localStorage.getItem(KEYS.SHOPS) || '[]');
                     let sh = shops.find(s => s.id === id);
-                    // 2) Tentative de pull cloud (best effort) pour récupérer les données les plus à jour
+                    
+                    // 2) Tentative de pull cloud pour récupérer les données les plus à jour
                     if (window.Cloud) {
                         try { await window.Cloud.pull(id, { applyToStorage: true }); } catch (_) { /* silencieux */ }
                     }
-                    if (!sh) {
-                        // Boutique inconnue : on la crée comme une coquille locale et on la sauvegarde
-                        sh = { id, name: 'Boutique ' + id.slice(-4), phone: '', address: '', createdAt: new Date().toISOString() };
+                    
+                    // 3) CORRECTION: Recharger les données après Cloud.pull!
+                    shops = JSON.parse(localStorage.getItem(KEYS.SHOPS) || '[]');
+                    sh = shops.find(s => s.id === id);
+                    
+                    // S'assurer que le shop est sauvegardé avec les bonnes données
+                    if (sh) {
+                        localStorage.setItem(KEYS.SHOP, JSON.stringify(sh));
                     }
+                    
+                    if (!sh) {
+                        // Boutique inconnue : créer une coquille
+                        sh = { id, name: id.slice(-4), phone: '', address: '', createdAt: new Date().toISOString() };
+                    }
+                    
                     localStorage.setItem('ma_last_shop_id', id);
                     onComplete(sh);
                 } catch (e) {
@@ -989,10 +1027,16 @@
             const [pwd, setPwd] = useState('');
             const [pwd2, setPwd2] = useState('');
             const submit = () => {
-                if (!name.trim() || !username.trim() || !pwd) return alert("Remplissez tous les champs.");
-                if (pwd.length < 4) return alert("Mot de passe : 4 caractères minimum.");
+                if (!name.trim()) return alert("Veuillez entrer votre nom.");
+                if (!username.trim()) return alert("Veuillez entrer un identifiant.");
+                if (!pwd) return alert("Veuillez entrer un mot de passe.");
+                if (pwd.length < 4) return alert("Mot de passe : minimum 4 caractères.");
                 if (pwd !== pwd2) return alert("Les mots de passe ne correspondent pas.");
-                onComplete({ id: 'U-' + Date.now(), name: name.trim(), username: username.trim().toLowerCase(), passwordHash: hashPwd(pwd), role: 'admin', active: true, createdAt: new Date().toISOString() });
+                try {
+                    onComplete({ id: 'U-' + Date.now(), name: name.trim(), username: username.trim().toLowerCase(), passwordHash: hashPwd(pwd), role: 'admin', active: true, createdAt: new Date().toISOString() });
+                } catch (e) {
+                    alert("Erreur création compte : " + (e.message || e));
+                }
             };
             return (
                 <div className="min-h-screen bg-slate-900 flex items-center justify-center p-6 text-white">
@@ -1219,7 +1263,18 @@
         function Dashboard({ products, sales, expenses }) {
             const active = sales.filter(s => s.status === 'active');
             const totalRec = active.reduce((s, x) => s + x.total, 0);
-            const profitTotal = active.reduce((s, x) => s + x.profit, 0);
+            const profitSales = active.reduce((s, x) => s + x.profit, 0);
+            
+            // Ajouter les bénéfices archivés
+            let profitArchived = 0;
+            try {
+                const archived = JSON.parse(localStorage.getItem('ma_market_archived_benefits_v3') || '[]');
+                profitArchived = archived.reduce((s, x) => s + (x.benefit || 0), 0);
+            } catch (e) {
+                console.warn('Erreur lecture archive:', e);
+            }
+            
+            const profitTotal = profitSales + profitArchived;
             const totalExp = expenses.reduce((s, x) => s + x.amount, 0);
 
             return (
@@ -1712,11 +1767,59 @@
                 setProducts(v => v.map(p => { const item = s.items.find(it => it.pid === p.id); return item ? { ...p, stock: Number((p.stock + item.qtyBase).toFixed(2)) } : p; }));
                 setSales(v => v.map(x => x.id === id ? { ...x, status: 'canceled' } : x));
             };
+            
+            const deleteSale = (sale) => {
+                // Dialog personnalisé au lieu de confirm()
+                const dialog = document.createElement('div');
+                dialog.style.cssText = `
+                    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                    background: white; padding: 24px; border-radius: 20px;
+                    box-shadow: 0 10px 40px rgba(0,0,0,0.2); z-index: 9999;
+                    max-width: 320px; text-align: center; font-family: Inter, Arial;
+                `;
+                dialog.innerHTML = `
+                    <h3 style="margin: 0 0 8px; font-size: 18px; font-weight: 900; color: #0f172a;">Supprimer cette vente?</h3>
+                    <p style="margin: 0 0 20px; font-size: 14px; color: #64748b;">Vente #${sale.num} - ${sale.total}F</p>
+                    <div style="display: flex; gap: 10px; margin-top: 20px;">
+                        <button id="keepBenefit" style="flex: 1; padding: 12px; background: #10b981; color: white; border: none; border-radius: 12px; font-weight: 900; cursor: pointer; font-size: 12px;">✅ GARDER BÉNÉFICE</button>
+                        <button id="removeBenefit" style="flex: 1; padding: 12px; background: #ef4444; color: white; border: none; border-radius: 12px; font-weight: 900; cursor: pointer; font-size: 12px;">❌ ENLEVER BÉNÉFICE</button>
+                    </div>
+                `;
+                document.body.appendChild(dialog);
+                
+                document.getElementById('keepBenefit').onclick = () => {
+                    document.body.removeChild(dialog);
+                    // Garder le bénéfice
+                    try {
+                        const archiveKey = 'ma_market_archived_benefits_v3';
+                        const existing = JSON.parse(localStorage.getItem(archiveKey) || '[]');
+                        const archivedBenefit = {
+                            id: Date.now(),
+                            benefit: sale.profit || 0,
+                            saleNum: sale.num,
+                            date: sale.date,
+                            archivedAt: new Date().toISOString()
+                        };
+                        localStorage.setItem(archiveKey, JSON.stringify([archivedBenefit, ...existing]));
+                    } catch (e) {
+                        console.warn('Erreur archivage bénéfice:', e);
+                    }
+                    setSales(prev => prev.map(x => x.id === sale.id ? { ...x, status: 'deleted', deletedAt: new Date().toISOString() } : x));
+                    alert(`✅ Vente supprimée\n✅ Bénéfice gardé: ${sale.profit}F`);
+                };
+                
+                document.getElementById('removeBenefit').onclick = () => {
+                    document.body.removeChild(dialog);
+                    // Enlever le bénéfice
+                    setSales(prev => prev.map(x => x.id === sale.id ? { ...x, status: 'deleted', deletedAt: new Date().toISOString() } : x));
+                    alert(`✅ Vente supprimée\n❌ Bénéfice supprimé: ${sale.profit}F`);
+                };
+            };
             return (
                 <div className="space-y-4">
                     <h2 className="text-2xl font-black uppercase text-slate-800">{readOnly ? "Mes Ventes" : "Historique Journalier"}</h2>
-                    {!sales.length && <div className="py-20 text-center text-slate-300 italic bg-white rounded-[32px] border">Aucune vente.</div>}
-                    {sales.map(s => (
+                    {!sales.filter(s => s.status !== 'deleted').length && <div className="py-20 text-center text-slate-300 italic bg-white rounded-[32px] border">Aucune vente.</div>}
+                    {sales.filter(s => s.status !== 'deleted').map(s => (
                         <div key={s.id} className={`p-6 bg-white rounded-[32px] border ${s.status==='canceled'?'opacity-50 line-through':''} flex justify-between items-center shadow-sm hover:border-blue-100 transition-all`}>
                             <div>
                                 <p className="text-[10px] font-bold text-slate-400 tracking-widest uppercase mb-1">REÇU #{s.num}{s.sellerName && !readOnly ? ` • ${s.sellerName}` : ''}</p>
@@ -1726,7 +1829,7 @@
                             <div className="flex gap-2">
                                 <button onClick={() => onPrint(s)} className="p-3 bg-blue-50 text-blue-600 rounded-xl"><Icon name="printer" size={18}/></button>
                                 {!readOnly && s.status==='active' && <button onClick={() => cancel(s.id)} className="p-3 bg-orange-50 text-orange-600 rounded-xl"><Icon name="alert-triangle" size={18}/></button>}
-                                {!readOnly && <button onClick={() => confirm("Supprimer définitivement ?") && setSales(prev => prev.filter(x => x.id !== s.id))} className="p-3 bg-red-50 text-red-500 rounded-xl"><Icon name="trash-2" size={18}/></button>}
+                                {!readOnly && <button onClick={() => deleteSale(s)} className="p-3 bg-red-50 text-red-500 rounded-xl"><Icon name="trash-2" size={18}/></button>}
                             </div>
                         </div>
                     ))}
@@ -1757,14 +1860,42 @@
         }
 
         function Debt({ sales, setSales }) {
+            const [debtPayments, setDebtPayments] = useState(() => JSON.parse(localStorage.getItem('ma_debt_payments_v3') || '{}'));
+            const [selectedDebt, setSelectedDebt] = useState(null);
+            const [partialAmount, setPartialAmount] = useState('');
+            
             const deb = sales.filter(s => s.payMethod === 'credit' && s.status === 'active');
+            
             const markPaid = (id) => {
-                if (!confirm("Confirmer le paiement de cette dette ? Elle sera retirée de la liste.")) return;
+                if (!confirm("Confirmer le paiement intégral de cette dette ?")) return;
                 setSales(v => v.map(x => x.id === id ? { ...x, payMethod: 'cash', paidAt: new Date().toISOString() } : x));
+                setDebtPayments(prev => { delete prev[id]; return prev; });
+                localStorage.setItem('ma_debt_payments_v3', JSON.stringify(debtPayments));
             };
+            
+            const addPartialPayment = (debtId, amount) => {
+                const amt = Number(amount);
+                if (amt <= 0) return alert("Montant invalide");
+                const debt = deb.find(d => d.id === debtId);
+                if (!debt) return;
+                const paid = debtPayments[debtId] || 0;
+                if (paid + amt > debt.total) return alert("Le montant dépasse le total");
+                const newPayments = { ...debtPayments, [debtId]: paid + amt };
+                setDebtPayments(newPayments);
+                localStorage.setItem('ma_debt_payments_v3', JSON.stringify(newPayments));
+                setPartialAmount('');
+                if (paid + amt >= debt.total) {
+                    if (confirm("Tranches complètes! Marquer comme payée?")) {
+                        markPaid(debtId);
+                    }
+                }
+            };
+            
             const removeDebt = (id) => {
-                if (!confirm("Supprimer définitivement cette dette ? (la vente reste enregistrée comme payée)")) return;
+                if (!confirm("Supprimer définitivement cette dette ?")) return;
                 setSales(v => v.map(x => x.id === id ? { ...x, payMethod: 'cash', paidAt: new Date().toISOString() } : x));
+                setDebtPayments(prev => { delete prev[id]; return prev; });
+                localStorage.setItem('ma_debt_payments_v3', JSON.stringify(debtPayments));
             };
             return (
                 <div className="space-y-6">
@@ -1774,18 +1905,39 @@
                             <thead className="bg-slate-50 text-[10px] font-black uppercase text-slate-400 border-b"><tr><th className="p-5">Client</th><th>Date</th><th className="text-right p-5">Montant</th><th className="text-right p-5">Action</th></tr></thead>
                             <tbody>{deb.length === 0 ? (
                                 <tr><td colSpan="4" className="p-10 text-center text-slate-400 font-bold text-sm">Aucune dette en cours 🎉</td></tr>
-                            ) : deb.map(s => (
-                                <tr key={s.id} className="border-b font-bold">
-                                    <td className="p-5 text-orange-600 uppercase italic">{(s.customer || 'Client Inconnu').substring(0,25)}</td>
-                                    <td className="text-xs text-slate-300">{new Date(s.date).toLocaleDateString()}</td>
-                                    <td className="text-right p-5 font-black">{s.total} F</td>
-                                    <td className="p-3 text-right">
-                                        <div className="flex gap-2 justify-end">
-                                            <button onClick={() => markPaid(s.id)} className="px-3 py-2 bg-emerald-600 text-white rounded-xl text-[10px] font-black uppercase shadow hover:bg-emerald-700 flex items-center gap-1"><Icon name="check" size={12}/>Payée</button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))}</tbody>
+                            ) : deb.map(s => {
+                                const paidAmount = debtPayments[s.id] || 0;
+                                const remaining = s.total - paidAmount;
+                                return (
+                                <React.Fragment key={s.id}>
+                                    <tr className="border-b font-bold">
+                                        <td className="p-5 text-orange-600 uppercase italic">{(s.customer || 'Client Inconnu').substring(0,25)}</td>
+                                        <td className="text-xs text-slate-300">{new Date(s.date).toLocaleDateString()}</td>
+                                        <td className="text-right p-5 font-black">{s.total} F {paidAmount > 0 && <span className="text-xs text-emerald-600">(-{paidAmount}F)</span>}</td>
+                                        <td className="p-3 text-right">
+                                            <div className="flex gap-2 justify-end">
+                                                {selectedDebt === s.id ? (
+                                                    <div className="flex gap-1">
+                                                        <input type="number" value={partialAmount} onChange={e=>setPartialAmount(e.target.value)} placeholder="Montant" className="w-24 px-2 py-1 text-xs rounded border border-slate-300 bg-white" />
+                                                        <button onClick={() => addPartialPayment(s.id, partialAmount)} className="px-2 py-1 bg-blue-600 text-white text-[10px] font-black rounded"><Icon name="plus" size={12}/></button>
+                                                        <button onClick={() => setSelectedDebt(null)} className="px-2 py-1 bg-slate-400 text-white text-[10px] rounded"><Icon name="x" size={12}/></button>
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        <button onClick={() => setSelectedDebt(s.id)} className="px-2 py-1 bg-blue-600 text-white rounded-lg text-[10px] font-black uppercase shadow"><Icon name="split" size={12}/>Tranche</button>
+                                                        <button onClick={() => markPaid(s.id)} className="px-3 py-2 bg-emerald-600 text-white rounded-xl text-[10px] font-black uppercase shadow hover:bg-emerald-700 flex items-center gap-1"><Icon name="check" size={12}/>Payée</button>
+                                                    </>
+                                                )}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {paidAmount > 0 && (
+                                        <tr className="bg-blue-50 border-b text-xs text-slate-600">
+                                            <td colSpan="4" className="p-3 italic text-center">Paiement(s) : {paidAmount}F / Reste : {remaining}F</td>
+                                        </tr>
+                                    )}
+                                </React.Fragment>
+                            )})}</tbody>
                         </table>
                     </div>
                 </div>
@@ -2045,6 +2197,22 @@
                 unavailable: { color: 'slate',   icon: 'cloud-off',   label: 'Cloud indisponible' },
             }[s.status] || { color: 'slate', icon: 'cloud', label: s.status };
 
+            const borderColorMap = {
+                emerald: 'border-emerald-200',
+                blue: 'border-blue-200',
+                amber: 'border-amber-200',
+                red: 'border-red-200',
+                slate: 'border-slate-200'
+            };
+            
+            const bgColorMap = {
+                emerald: 'bg-emerald-600',
+                blue: 'bg-blue-600',
+                amber: 'bg-amber-600',
+                red: 'bg-red-600',
+                slate: 'bg-slate-600'
+            };
+
             const forcePush = async () => { setBusy(true); await Cloud.push(shop.id); setBusy(false); };
             const forcePull = async () => {
                 if (!confirm("Restaurer les données depuis le cloud ? Les changements locaux non synchronisés seront écrasés.")) return;
@@ -2058,9 +2226,9 @@
             };
 
             return (
-                <div className={`bg-white p-6 rounded-[40px] shadow-sm border-2 border-${meta.color}-200 space-y-4`}>
+                <div className={`bg-white p-6 rounded-[40px] shadow-sm border-2 ${borderColorMap[meta.color] || 'border-slate-200'} space-y-4`}>
                     <div className="flex items-center gap-4">
-                        <div className={`w-12 h-12 bg-${meta.color}-600 rounded-2xl flex items-center justify-center text-white shrink-0 ${s.status==='syncing' ? 'animate-pulse' : ''}`}>
+                        <div className={`w-12 h-12 ${bgColorMap[meta.color] || 'bg-slate-600'} rounded-2xl flex items-center justify-center text-white shrink-0 ${s.status==='syncing' ? 'animate-pulse' : ''}`}>
                             <Icon name={meta.icon} size={22}/>
                         </div>
                         <div className="min-w-0 flex-1">
